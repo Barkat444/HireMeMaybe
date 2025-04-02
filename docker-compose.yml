@@ -1,0 +1,16 @@
+services:
+  naukri-bot:
+    build: .
+    env_file:
+      - .env
+    environment:
+      - DOCKER_CONTAINER=true
+      - PYTHONUNBUFFERED=1
+      - TZ=Asia/Kolkata 
+    volumes:
+      - .:/app
+      - /dev/shm:/dev/shm
+      - /etc/localtime:/etc/localtime:ro  
+      - /etc/timezone:/etc/timezone:ro
+    restart: unless-stopped
+    shm_size: 2gb

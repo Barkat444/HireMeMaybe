@@ -1,0 +1,11 @@
+# Debug files
+*.png
+*.log
+*.logs
+*_page_source.html
+backups/
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
