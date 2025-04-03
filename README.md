@@ -1,6 +1,6 @@
-# 🚀 Naukri Bot: Automate Your Job Hunt Like a Pro! 💼
+# 🚀 HireMeMaybe: Automate Your Job Hunt Like a Pro! 💼
 
-**Naukri Bot** is your all-in-one job-hunting sidekick. It automatically logs into your Naukri.com account, updates your profile, applies to relevant jobs, and even rotates headlines — all without you lifting a finger. Just set it and forget it ⏰💻
+**HireMeMaybe (Naukri Bot)** is your all-in-one job-hunting sidekick. It automatically logs into your Naukri.com account, updates your profile, applies to relevant jobs, and even rotates headlines — all without you lifting a finger. Just set it and forget it ⏰💻
 
 Built with Selenium, Python, and Docker, it smartly mimics human behavior to avoid detection, and even runs on a custom interval you define via `.env`.
 
@@ -9,19 +9,20 @@ Built with Selenium, Python, and Docker, it smartly mimics human behavior to avo
 ## ✨ Features
 
 - **Auto-Triggered Process**: Automatically runs itself based on the interval (in hours) that *you* define in `.env`.
-- **Screenshot Cleanup**: Cleans up old screenshots before every new run to save space and avoid clutter.
 - **Headline Update**: Rotates your profile headline from a pre-defined list to keep your profile fresh and engaging.
 - **Resume Update**: Re-uploads your resume to keep it at the top of recruiter lists.
 - **Job Applications**: Applies to jobs based on title, location, and experience with smart filters:
   - **Freshness**: Only jobs posted in the last 1 day.
   - **Relevance**: Prioritizes the most matching roles.
   - **Direct Apply Only**: Skips jobs that redirect to external sites.
+- **Fallbacks**: Applies to the Jobs roles repeatedly if the applied jobs < MAX_APPLICATIONS, fallback searches are triggered.
 - **Early Access Roles**: Shares interest in premium early access roles (for Naukri Premium users).
 - **Detection Prevention**: Selenium config is tuned to bypass bot detection techniques.
 - **Customizable Settings**: Easily tweak job titles, locations, experience, and max applications in `.env`.
-- **Docker Support**: Fully containerized — works on any machine with Docker.
+- **Containerised (Docker)**: Fully containerized — works on any machine with Docker.
 - **Improved Login System**: Multiple fallback login flows for more reliability.
 - **Detailed Logging**: Saves logs and screenshots of each step (especially useful for debugging).
+- **Screenshot Cleanup**: Cleans up old screenshots before every new run to save space and avoid clutter.
 
 ---
 
@@ -29,7 +30,8 @@ Built with Selenium, Python, and Docker, it smartly mimics human behavior to avo
 
 Make sure you have the following installed:
 
-- [Docker](https://www.docker.com/) *(Recommended)*
+- [Docker](https://www.docker.com/) *(Recommended)* --> For flexy trigger/deployment
+- **Below are the Requirements for running locally** (Optional)
 - Python 3.8+
 - Google Chrome
 - ChromeDriver (auto-managed via `webdriver-manager`)
@@ -40,12 +42,12 @@ Make sure you have the following installed:
 
 1. **Clone the Repository**:
    ```bash
-   git clone https://github.com/your-username/naukri-bot.git
-   cd naukri-bot
+   git clone https://github.com/Barkat444/HireMeMaybe.git
+   cd HireMeMaybe
    ```
 
 2. **Configure Your Environment**:
-   - Create and update your `.env`:
+   - Update your `.env`:
      ```env
      NAUKRI_EMAIL=your_email
      NAUKRI_PASSWORD=your_password
@@ -68,20 +70,20 @@ Make sure you have the following installed:
      ]
      ```
 
-   - Place your updated resume as `resume.pdf` in the root directory.
+   - Place your updated resume as `.pdf` inside the HireMeMaybe directory. (Ex : HireMeMaybe/your_resume.pdf)
 
 3. **Run the Bot**:
    - With Docker:
      ```bash
      docker-compose up --build
      ```
-   - Locally with Python:
+   - Or Locally with Python:
      ```bash
      pip install -r requirements.txt
      python3 apply_jobs.py
      ```
 
-   - ✅ The bot will automatically run every `INTERVAL_HOURS` (e.g. every hour) as configured.
+   - ✅ The bot will automatically run every `INTERVAL_HOURS` (e.g. every hour) as configured in the .env.
 
 ---
 
