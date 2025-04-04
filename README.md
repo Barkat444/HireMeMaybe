@@ -80,7 +80,7 @@ Make sure you have the following installed:
    - Or Locally with Python:
      ```bash
      pip install -r requirements.txt
-     python3 apply_jobs.py
+     python3 main.py
      ```
 
    - ✅ The bot will automatically run every `INTERVAL_HOURS` (e.g. every hour) as configured in the .env.
