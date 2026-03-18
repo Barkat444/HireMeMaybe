@@ -1,0 +1,15 @@
+# Debug files
+*.png
+*.log
+*.logs
+*_page_source.html
+backups/
+
+# Runtime data
+qa_log.json
+applied_jobs.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.class

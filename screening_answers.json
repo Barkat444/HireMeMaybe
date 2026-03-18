@@ -1,0 +1,226 @@
+{
+  "profile": {
+    "current_ctc_lpa": "",
+    "expected_ctc_lpa": "",
+    "notice_period": "30 days",
+    "notice_period_days": "30",
+    "immediate_joiner": "No",
+    "serving_notice": "No",
+    "current_location": "Bengaluru",
+    "preferred_location": "Bengaluru",
+    "willing_to_relocate": "Yes",
+    "highest_qualification": "B.Tech",
+    "degree": "B.Tech",
+    "specialization": "Computer Science",
+    "year_of_passing": "2022",
+    "percentage_cgpa": "8.0",
+    "total_experience_years": "",
+    "gender": "Male",
+    "marital_status": "Single",
+    "date_of_birth": "2000-01-01",
+    "age": "",
+    "nationality": "Indian",
+    "have_passport": "Yes",
+    "have_pan": "Yes",
+    "have_aadhaar": "Yes",
+    "languages": "English, Hindi",
+    "english_proficiency": "Fluent",
+    "preferred_shift": "Day",
+    "willing_night_shift": "Yes",
+    "willing_rotational_shift": "Yes",
+    "work_mode_preference": "Hybrid",
+    "willing_work_from_office": "Yes",
+    "current_company": "Confidential",
+    "current_designation": "DevOps Engineer",
+    "reason_for_change": "Looking for better growth opportunities and challenging projects",
+    "have_offer_in_hand": "No"
+  },
+
+  "questions": [
+    {
+      "keywords": ["current ctc", "current salary", "current annual", "present ctc", "present salary", "current compensation", "current package"],
+      "answer_key": "current_ctc_lpa",
+      "type": "text"
+    },
+    {
+      "keywords": ["expected ctc", "expected salary", "expected annual", "expected compensation", "expected package", "desired salary", "desired ctc"],
+      "answer_key": "expected_ctc_lpa",
+      "type": "text"
+    },
+    {
+      "keywords": ["notice period", "joining time", "how soon can you join", "time to join", "how many days to join", "joining period"],
+      "answer_key": "notice_period",
+      "type": "select_or_text"
+    },
+    {
+      "keywords": ["notice period in days", "notice days"],
+      "answer_key": "notice_period_days",
+      "type": "text"
+    },
+    {
+      "keywords": ["immediate joiner", "can you join immediately", "join immediately", "ready to join immediately"],
+      "answer_key": "immediate_joiner",
+      "type": "radio"
+    },
+    {
+      "keywords": ["serving notice", "currently serving notice", "are you serving notice"],
+      "answer_key": "serving_notice",
+      "type": "radio"
+    },
+    {
+      "keywords": ["current location", "current city", "present location", "present city", "residing city", "residing in", "where do you currently"],
+      "answer_key": "current_location",
+      "type": "select_or_text"
+    },
+    {
+      "keywords": ["preferred location", "preferred city", "desired location"],
+      "answer_key": "preferred_location",
+      "type": "select_or_text"
+    },
+    {
+      "keywords": ["willing to relocate", "relocate", "open to relocation", "ready to relocate", "can you relocate"],
+      "answer_key": "willing_to_relocate",
+      "type": "radio"
+    },
+    {
+      "keywords": ["highest qualification", "highest education", "educational qualification", "highest degree"],
+      "answer_key": "highest_qualification",
+      "type": "select_or_text"
+    },
+    {
+      "keywords": ["degree", "qualification name", "course name"],
+      "answer_key": "degree",
+      "type": "select_or_text"
+    },
+    {
+      "keywords": ["specialization", "branch", "stream", "major"],
+      "answer_key": "specialization",
+      "type": "select_or_text"
+    },
+    {
+      "keywords": ["year of passing", "passing year", "graduation year", "year of graduation", "passed out year"],
+      "answer_key": "year_of_passing",
+      "type": "text"
+    },
+    {
+      "keywords": ["percentage", "cgpa", "aggregate", "marks scored", "score"],
+      "answer_key": "percentage_cgpa",
+      "type": "text"
+    },
+    {
+      "keywords": ["total experience", "total years of experience", "overall experience", "years of experience", "how many years of experience", "work experience"],
+      "answer_key": "total_experience_years",
+      "type": "text"
+    },
+    {
+      "keywords": ["gender"],
+      "answer_key": "gender",
+      "type": "select_or_text"
+    },
+    {
+      "keywords": ["marital status", "married"],
+      "answer_key": "marital_status",
+      "type": "select_or_text"
+    },
+    {
+      "keywords": ["date of birth", "dob", "birth date"],
+      "answer_key": "date_of_birth",
+      "type": "text"
+    },
+    {
+      "keywords": ["age", "how old"],
+      "answer_key": "age",
+      "type": "text"
+    },
+    {
+      "keywords": ["nationality", "citizen"],
+      "answer_key": "nationality",
+      "type": "select_or_text"
+    },
+    {
+      "keywords": ["passport", "do you have passport", "valid passport", "have a passport"],
+      "answer_key": "have_passport",
+      "type": "radio"
+    },
+    {
+      "keywords": ["pan card", "pan number", "do you have pan", "have pan"],
+      "answer_key": "have_pan",
+      "type": "radio"
+    },
+    {
+      "keywords": ["aadhaar", "aadhar", "do you have aadhaar", "have aadhaar"],
+      "answer_key": "have_aadhaar",
+      "type": "radio"
+    },
+    {
+      "keywords": ["languages known", "languages you know", "language proficiency", "which languages"],
+      "answer_key": "languages",
+      "type": "text"
+    },
+    {
+      "keywords": ["english proficiency", "english fluency", "proficient in english", "level of english"],
+      "answer_key": "english_proficiency",
+      "type": "select_or_text"
+    },
+    {
+      "keywords": ["preferred shift", "shift preference", "which shift"],
+      "answer_key": "preferred_shift",
+      "type": "select_or_text"
+    },
+    {
+      "keywords": ["night shift", "willing to work night", "work in night", "comfortable with night"],
+      "answer_key": "willing_night_shift",
+      "type": "radio"
+    },
+    {
+      "keywords": ["rotational shift", "willing to work rotational", "rotating shift"],
+      "answer_key": "willing_rotational_shift",
+      "type": "radio"
+    },
+    {
+      "keywords": ["work from office", "work from home", "wfh", "wfo", "remote", "hybrid", "work mode", "working mode", "on-site", "onsite"],
+      "answer_key": "work_mode_preference",
+      "type": "select_or_text"
+    },
+    {
+      "keywords": ["willing to work from office", "comfortable working from office", "come to office"],
+      "answer_key": "willing_work_from_office",
+      "type": "radio"
+    },
+    {
+      "keywords": ["current company", "present company", "company name", "current employer", "present employer"],
+      "answer_key": "current_company",
+      "type": "text"
+    },
+    {
+      "keywords": ["current designation", "current role", "present designation", "current job title", "present role"],
+      "answer_key": "current_designation",
+      "type": "text"
+    },
+    {
+      "keywords": ["reason for job change", "reason for change", "why are you looking", "why do you want to change", "reason for leaving"],
+      "answer_key": "reason_for_change",
+      "type": "text"
+    },
+    {
+      "keywords": ["offer in hand", "do you have any offer", "holding any offer", "have an offer"],
+      "answer_key": "have_offer_in_hand",
+      "type": "radio"
+    },
+    {
+      "keywords": ["in hand salary", "take home salary", "in-hand", "take home", "net salary"],
+      "answer_key": "current_ctc_lpa",
+      "type": "text"
+    },
+    {
+      "keywords": ["fixed salary", "fixed component", "fixed ctc"],
+      "answer_key": "current_ctc_lpa",
+      "type": "text"
+    },
+    {
+      "keywords": ["variable salary", "variable component", "variable pay", "bonus"],
+      "answer_key": "current_ctc_lpa",
+      "type": "text"
+    }
+  ]
+}
