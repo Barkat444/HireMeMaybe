@@ -11,9 +11,12 @@ from selenium.common.exceptions import NoSuchElementException, StaleElementRefer
 from utils import save_screenshot
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEBUG_DIR = os.path.join(SCRIPT_DIR, "debug")
 SCREENING_ANSWERS_FILE = os.path.join(SCRIPT_DIR, "screening_answers.json")
-QA_LOG_FILE = os.path.join(SCRIPT_DIR, "qa_log.json")
-LEARNED_SELECTORS_FILE = os.path.join(SCRIPT_DIR, "learned_selectors.json")
+QA_LOG_FILE = os.path.join(DEBUG_DIR, "qa_log.json")
+LEARNED_SELECTORS_FILE = os.path.join(DEBUG_DIR, "learned_selectors.json")
+
+os.makedirs(DEBUG_DIR, exist_ok=True)
 
 _screening_config = None
 _resume_text_cache = None
@@ -106,20 +109,25 @@ def load_resume_text():
 
 def match_config(question_text):
     """Match question text against screening_answers.json keyword patterns.
+    Uses longest-match-wins strategy so specific keywords beat generic ones.
     Returns (answer_value, answer_key, answer_type) or (None, None, None)."""
     config = _load_screening_config()
     question_lower = question_text.lower().strip()
 
+    best_match = None
+    best_keyword_len = 0
+
     for entry in config.get("questions", []):
         for keyword in entry["keywords"]:
-            if keyword.lower() in question_lower:
+            kw_lower = keyword.lower()
+            if kw_lower in question_lower and len(kw_lower) > best_keyword_len:
                 answer_key = entry["answer_key"]
                 answer_value = config["profile"].get(answer_key, "")
                 if answer_value:
-                    return answer_value, answer_key, entry.get("type", "text")
-                break
+                    best_match = (answer_value, answer_key, entry.get("type", "text"))
+                    best_keyword_len = len(kw_lower)
 
-    return None, None, None
+    return best_match if best_match else (None, None, None)
 
 
 def ask_ollama(question_text, options, resume_context):
@@ -882,12 +890,218 @@ def _check_application_success(driver, use_ai=False):
     return False
 
 
+def _find_clickable_option_buttons(driver, answer_text):
+    """Find and click option buttons (city selection, skill chips, etc.) when the
+    chatbot replaces the text input with clickable options.
+
+    Naukri's chatbot sometimes shows clickable option buttons/chips instead of a
+    text input for questions like 'select the city'. These aren't radio buttons
+    (.ssrc__radio-btn-container) but standalone clickable elements inside the chat.
+
+    Returns True if an option was clicked, False otherwise."""
+
+    answer_lower = (answer_text or "").strip().lower()
+    if not answer_lower:
+        return False
+
+    option_selectors = [
+        "li[class*='botItem'] button",
+        "li[class*='botItem'] div[class*='option']",
+        "li[class*='botItem'] span[class*='option']",
+        "li[class*='botItem'] a[class*='option']",
+        "[class*='chatOption']",
+        "[class*='suggestedOption']",
+        "[class*='chip']",
+        "[class*='Chip']",
+        "[class*='optionItem']",
+        "[class*='OptionItem']",
+        "[class*='option-btn']",
+        "[class*='optionBtn']",
+        "[class*='select-option']",
+        "[class*='multi-select'] li",
+        "[class*='multiSelect'] li",
+        "[class*='dropdown-option']",
+        "ul[class*='option'] li",
+        "div[class*='option'] span",
+    ]
+
+    all_options = []
+    for sel in option_selectors:
+        try:
+            elements = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in elements:
+                if el.is_displayed() and el.text.strip():
+                    all_options.append(el)
+        except Exception:
+            continue
+
+    if not all_options:
+        try:
+            clickables = driver.find_elements(By.XPATH,
+                "//div[contains(@class,'chatbot') or contains(@class,'chat')]"
+                "//button | //div[contains(@class,'chatbot') or contains(@class,'chat')]"
+                "//div[@role='option'] | //div[contains(@class,'chatbot') or "
+                "contains(@class,'chat')]//li[@role='option']")
+            for el in clickables:
+                if el.is_displayed() and el.text.strip():
+                    all_options.append(el)
+        except Exception:
+            pass
+
+    if not all_options:
+        return False
+
+    option_texts = [el.text.strip() for el in all_options]
+    logging.info(f"Found {len(all_options)} clickable option buttons: {option_texts[:10]}")
+
+    matched_text = _fuzzy_match_option(answer_text, option_texts)
+    if matched_text:
+        for el in all_options:
+            if el.text.strip().lower() == matched_text.lower():
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+                    time.sleep(random.uniform(0.3, 0.6))
+                    driver.execute_script("arguments[0].click();", el)
+                    logging.info(f"Clicked option button: '{el.text.strip()}'")
+                    return True
+                except Exception as e:
+                    logging.warning(f"Failed to click option '{el.text.strip()}': {e}")
+                    continue
+
+    for el in all_options:
+        el_text = el.text.strip().lower()
+        if answer_lower in el_text or el_text in answer_lower:
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+                time.sleep(random.uniform(0.3, 0.6))
+                driver.execute_script("arguments[0].click();", el)
+                logging.info(f"Clicked option button (substring match): '{el.text.strip()}'")
+                return True
+            except Exception:
+                continue
+
+    return False
+
+
+def _ai_find_and_click_option(driver, answer_text, question_text):
+    """Use AI to find clickable option elements when standard selectors fail.
+    Extracts a DOM snapshot, asks Ollama for a selector, tries to click."""
+
+    snapshot = _extract_dom_snapshot(driver)
+    if not snapshot:
+        return False
+
+    prompt = (
+        f"The user is answering the question: '{question_text}'\n"
+        f"Their answer is: '{answer_text}'\n\n"
+        "The chatbot shows clickable options/buttons instead of a text input.\n"
+        "Find the CSS selector or XPath for the clickable option that best "
+        f"matches '{answer_text}'. Return ONLY one selector line like:\n"
+        "css: <selector>\nor\nxpath: <selector>\n\n"
+        f"Page DOM:\n{snapshot[:3000]}"
+    )
+
+    response = _ask_ollama_page_analysis(snapshot, prompt)
+    if not response:
+        return False
+
+    for line in response.strip().split("\n"):
+        line = line.strip()
+        if line.startswith("css:"):
+            sel = line[4:].strip().strip("'\"")
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                for el in els:
+                    if el.is_displayed():
+                        driver.execute_script("arguments[0].click();", el)
+                        logging.info(f"AI clicked option via CSS: {sel}")
+                        return True
+            except Exception:
+                pass
+        elif line.startswith("xpath:"):
+            sel = line[6:].strip().strip("'\"")
+            try:
+                els = driver.find_elements(By.XPATH, sel)
+                for el in els:
+                    if el.is_displayed():
+                        driver.execute_script("arguments[0].click();", el)
+                        logging.info(f"AI clicked option via XPath: {sel}")
+                        return True
+            except Exception:
+                pass
+
+    return False
+
+
+def _wait_for_dom_settle(driver, wait_range=(1.5, 3.0)):
+    """Wait for DOM to settle after a save/submit action.
+    Gives the chatbot time to process the answer and render the next question."""
+    time.sleep(random.uniform(*wait_range))
+
+
+def _type_into_text_input(driver, chatbot_info, answer):
+    """Try to type an answer into the chatbot text input. Returns True on success."""
+
+    text_input = chatbot_info.get("text_input")
+
+    if text_input:
+        try:
+            if not text_input.is_displayed():
+                raise StaleElementReferenceException("Text input no longer visible")
+
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", text_input)
+            text_input.click()
+            time.sleep(random.uniform(0.3, 0.7))
+
+            tag = text_input.tag_name.lower()
+            is_contenteditable = text_input.get_attribute("contenteditable") == "true"
+
+            if is_contenteditable or tag == "div":
+                driver.execute_script("arguments[0].textContent = '';", text_input)
+            else:
+                text_input.clear()
+
+            time.sleep(random.uniform(0.2, 0.5))
+
+            for char in str(answer):
+                text_input.send_keys(char)
+                time.sleep(random.uniform(0.02, 0.06))
+
+            logging.info(f"Typed answer: '{answer}'")
+            return True
+
+        except (StaleElementReferenceException, NoSuchElementException):
+            logging.warning("Text input became stale, re-detecting...")
+            chatbot_info["text_input"] = None
+        except Exception as e:
+            logging.error(f"Error typing answer: {e}")
+            chatbot_info["text_input"] = None
+
+    for attempt in range(2):
+        if attempt > 0:
+            time.sleep(random.uniform(1.0, 2.0))
+        new_input = _refind_text_input(driver)
+        if new_input:
+            chatbot_info["text_input"] = new_input
+            try:
+                new_input.click()
+                time.sleep(random.uniform(0.2, 0.4))
+                new_input.send_keys(str(answer))
+                logging.info(f"Typed answer via re-detected input: '{answer}'")
+                return True
+            except Exception as e:
+                logging.error(f"Re-detected text input failed (attempt {attempt+1}): {e}")
+
+    return False
+
+
 def _handle_naukri_chatbot(driver, chatbot_info, job_title, company, resume_context):
     """Handle Naukri's chatbot questionnaire using verified selectors.
 
-    Supports two question types that alternate:
-      1. Radio/MCQ questions -> detect .ssrc__radio-btn-container, select answer, click save
-      2. Text questions      -> type into div.textArea or input field, click save
+    Supports three question types that alternate:
+      1. Radio/MCQ questions   -> detect .ssrc__radio-btn-container, select answer, click save
+      2. Clickable options     -> detect option buttons/chips (e.g., city selection), click matching
+      3. Text questions        -> type into div.textArea or input field, click save
 
     Loops until success message or max iterations.
     """
@@ -898,14 +1112,14 @@ def _handle_naukri_chatbot(driver, chatbot_info, job_title, company, resume_cont
     consecutive_failures = 0
 
     for iteration in range(max_iterations):
-        time.sleep(random.uniform(1.5, 3.5))
+        _wait_for_dom_settle(driver, (1.5, 3.5))
 
         if _check_application_success(driver):
             logging.info("Application submitted successfully (detected success message)")
             save_screenshot(driver, f"chatbot_success_{company.replace(' ', '_')[:20]}", "success")
             return True
 
-        # --- Detect if this is a radio-button question ---
+        # --- Phase 1: Detect if this is a radio-button question ---
         radio_handled = False
         try:
             radio_containers = driver.find_elements(By.CSS_SELECTOR, ".ssrc__radio-btn-container")
@@ -986,7 +1200,7 @@ def _handle_naukri_chatbot(driver, chatbot_info, job_title, company, resume_cont
         if radio_handled:
             continue
 
-        # --- Text-based question handling ---
+        # --- Phase 2: Get the question text ---
         question_text = _get_chatbot_question_text(driver, chatbot_info, previous_questions)
 
         if not question_text:
@@ -1000,10 +1214,9 @@ def _handle_naukri_chatbot(driver, chatbot_info, job_title, company, resume_cont
         previous_questions.add(question_text)
         logging.info(f"Chatbot Q{iteration+1} [text]: '{question_text[:100]}'")
 
-        # --- Check for special question types ---
+        # --- Phase 3: Check for special question types ---
         question_lower = question_text.lower()
 
-        # DOB special handling
         if "date of birth" in question_lower or "dob" in question_lower:
             try:
                 dob_input = driver.find_element(By.CSS_SELECTOR, "ul[id*='dob__input-container']")
@@ -1022,6 +1235,7 @@ def _handle_naukri_chatbot(driver, chatbot_info, job_title, company, resume_cont
             except Exception:
                 pass
 
+        # --- Phase 4: Get answer from config/Ollama ---
         answer, config_key, _ = match_config(question_text)
         source = "config"
 
@@ -1035,63 +1249,33 @@ def _handle_naukri_chatbot(driver, chatbot_info, job_title, company, resume_cont
             source = "fallback"
             logging.warning(f"No answer for: '{question_text[:80]}', using fallback")
 
-        # --- Type the answer into the text input ---
-        text_input = chatbot_info.get("text_input")
-        typed = False
+        # --- Phase 5: Try typing into text input ---
+        typed = _type_into_text_input(driver, chatbot_info, answer)
 
-        if text_input:
-            try:
-                if not text_input.is_displayed():
-                    raise StaleElementReferenceException("Text input no longer visible")
-
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", text_input)
-                text_input.click()
-                time.sleep(random.uniform(0.3, 0.7))
-
-                tag = text_input.tag_name.lower()
-                is_contenteditable = text_input.get_attribute("contenteditable") == "true"
-
-                if is_contenteditable or tag == "div":
-                    driver.execute_script("arguments[0].textContent = '';", text_input)
-                else:
-                    text_input.clear()
-
-                time.sleep(random.uniform(0.2, 0.5))
-
-                for char in str(answer):
-                    text_input.send_keys(char)
-                    time.sleep(random.uniform(0.02, 0.06))
-
-                typed = True
-                logging.info(f"Typed answer: '{answer}' (source: {source})")
-
-            except (StaleElementReferenceException, NoSuchElementException):
-                logging.warning("Text input became stale, re-detecting...")
-                chatbot_info["text_input"] = _refind_text_input(driver)
-                text_input = chatbot_info["text_input"]
-                if text_input:
-                    try:
-                        text_input.click()
-                        time.sleep(random.uniform(0.2, 0.4))
-                        text_input.send_keys(str(answer))
-                        typed = True
-                    except Exception as e2:
-                        logging.error(f"Re-detection also failed: {e2}")
-            except Exception as e:
-                logging.error(f"Error typing answer: {e}")
-
+        # --- Phase 6: If no text input, try clickable option buttons ---
         if not typed:
-            text_input = _refind_text_input(driver)
-            if text_input:
-                chatbot_info["text_input"] = text_input
-                try:
-                    text_input.click()
-                    time.sleep(random.uniform(0.2, 0.4))
-                    text_input.send_keys(str(answer))
-                    typed = True
-                except Exception as e:
-                    logging.error(f"Fallback text input also failed: {e}")
+            logging.info("Text input not available, checking for clickable option buttons...")
+            clicked_option = _find_clickable_option_buttons(driver, answer)
 
+            if not clicked_option:
+                logging.info("Standard option selectors failed, trying AI...")
+                clicked_option = _ai_find_and_click_option(driver, answer, question_text)
+
+            if clicked_option:
+                time.sleep(random.uniform(0.8, 1.5))
+                save_needed = True
+                try:
+                    if _check_application_success(driver):
+                        save_needed = False
+                except Exception:
+                    pass
+                if save_needed:
+                    _click_naukri_save_button(driver, chatbot_info)
+                answered_count += 1
+                log_qa(job_title, company, question_text, "chatbot_option_click", answer, source, config_key)
+                continue
+
+        # --- Phase 7: If nothing worked, check page state ---
         if not typed:
             logging.warning("All input methods failed, asking AI to identify page state...")
             page_state = _ai_identify_page_state(driver, chatbot_info.get("container"))
@@ -1101,14 +1285,19 @@ def _handle_naukri_chatbot(driver, chatbot_info, job_title, company, resume_cont
             elif page_state in ("error", "already_applied"):
                 logging.info(f"AI detected page state: {page_state}, stopping")
                 return False
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                logging.info("Repeated failures, finishing chatbot")
+                break
+            continue
 
         if typed:
             time.sleep(random.uniform(0.5, 1.0))
             _click_naukri_save_button(driver, chatbot_info)
             answered_count += 1
+            _wait_for_dom_settle(driver, (1.0, 2.0))
 
         log_qa(job_title, company, question_text, "chatbot_text", answer, source, config_key)
-        time.sleep(random.uniform(1.5, 3.0))
 
     # Final success check (use AI on this final check since it's the deciding moment)
     time.sleep(random.uniform(2, 4))
