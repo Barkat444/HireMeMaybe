@@ -8,6 +8,7 @@ backups/
 # Runtime data
 qa_log.json
 applied_jobs.txt
+learned_selectors.json
 
 # Python
 __pycache__/
