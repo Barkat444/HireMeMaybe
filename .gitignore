@@ -5,8 +5,8 @@
 *_page_source.html
 backups/
 
-# Runtime data
-applied_jobs.txt
+# Runtime data (all in debug/)
+debug/applied_jobs.txt
 debug/qa_log.json
 debug/learned_selectors.json
 

@@ -1039,6 +1039,259 @@ def _wait_for_dom_settle(driver, wait_range=(1.5, 3.0)):
     time.sleep(random.uniform(*wait_range))
 
 
+def _detect_visible_input_type(driver):
+    """Scan the DOM to determine what input type is currently visible.
+
+    Returns one of: 'radio', 'checkbox', 'date', 'text', 'options', or None.
+    Also returns any relevant elements found as a list.
+    """
+    try:
+        radios = driver.find_elements(By.CSS_SELECTOR, ".ssrc__radio-btn-container")
+        visible_radios = [r for r in radios if r.is_displayed()]
+        if visible_radios:
+            return "radio", visible_radios
+    except Exception:
+        pass
+
+    try:
+        checkboxes = driver.find_elements(By.CSS_SELECTOR,
+            ".ssrc__checkbox-container, "
+            "[class*='checkbox-container'], "
+            "[class*='checkboxContainer'], "
+            "li input[type='checkbox'], "
+            "div input[type='checkbox']")
+        visible_cbs = []
+        for cb in checkboxes:
+            try:
+                if cb.is_displayed():
+                    visible_cbs.append(cb)
+            except Exception:
+                continue
+        if visible_cbs:
+            return "checkbox", visible_cbs
+
+        cb_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+        visible_cb_inputs = [c for c in cb_inputs if c.is_displayed()]
+        if visible_cb_inputs:
+            return "checkbox", visible_cb_inputs
+    except Exception:
+        pass
+
+    try:
+        date_selectors = [
+            "ul[id*='dob__input-container']",
+            "input[type='date']",
+            "input[placeholder*='DD']",
+            "input[placeholder*='dd/mm']",
+            "input[placeholder*='MM/DD']",
+            "[class*='datePicker']",
+            "[class*='date-picker']",
+        ]
+        for sel in date_selectors:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            visible = [e for e in els if e.is_displayed()]
+            if visible:
+                return "date", visible
+    except Exception:
+        pass
+
+    try:
+        text_selectors = [
+            "div.textArea",
+            "[class*='textArea']",
+            "div[contenteditable='true']",
+        ]
+        for sel in text_selectors:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            visible = [e for e in els if e.is_displayed()]
+            if visible:
+                return "text", visible
+    except Exception:
+        pass
+
+    return None, []
+
+
+def _handle_checkbox_question(driver, chatbot_info, question_text, answer, job_title, company, source, config_key):
+    """Handle checkbox-type questions (e.g., city multi-select).
+
+    Finds visible checkboxes, extracts their labels, matches the answer,
+    and clicks the matching checkbox(es). Returns True if handled.
+    """
+    checkbox_selectors = [
+        ".ssrc__checkbox-container",
+        "[class*='checkbox-container']",
+        "[class*='checkboxContainer']",
+    ]
+
+    containers = []
+    for sel in checkbox_selectors:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            containers.extend([e for e in els if e.is_displayed()])
+        except Exception:
+            continue
+
+    options = []
+    elements = []
+
+    if containers:
+        for cont in containers:
+            try:
+                label = cont.find_element(By.CSS_SELECTOR, "label")
+                label_text = label.text.strip()
+                if label_text:
+                    options.append(label_text)
+                    elements.append(cont)
+            except Exception:
+                try:
+                    span = cont.find_element(By.CSS_SELECTOR, "span")
+                    span_text = span.text.strip()
+                    if span_text:
+                        options.append(span_text)
+                        elements.append(cont)
+                except Exception:
+                    text = cont.text.strip()
+                    if text:
+                        options.append(text)
+                        elements.append(cont)
+
+    if not options:
+        try:
+            cb_inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+            for cb in cb_inputs:
+                if not cb.is_displayed():
+                    continue
+                label_text = ""
+                try:
+                    cb_id = cb.get_attribute("id")
+                    if cb_id:
+                        labels = driver.find_elements(By.CSS_SELECTOR, f"label[for='{cb_id}']")
+                        if labels:
+                            label_text = labels[0].text.strip()
+                except Exception:
+                    pass
+                if not label_text:
+                    try:
+                        parent = cb.find_element(By.XPATH, "./..")
+                        label_text = parent.text.strip()
+                    except Exception:
+                        label_text = cb.get_attribute("value") or ""
+                if label_text:
+                    options.append(label_text)
+                    elements.append(cb)
+        except Exception:
+            pass
+
+    if not options:
+        logging.info("No checkbox options found")
+        return False
+
+    logging.info(f"Checkbox options: {options}")
+
+    matched = _fuzzy_match_option(answer, options)
+    clicked = False
+
+    for i, opt_text in enumerate(options):
+        if matched and opt_text.lower().strip() == matched.lower().strip():
+            el = elements[i]
+            try:
+                cb_input = el.find_element(By.CSS_SELECTOR, "input[type='checkbox']")
+                driver.execute_script("arguments[0].click();", cb_input)
+            except Exception:
+                driver.execute_script("arguments[0].click();", el)
+            logging.info(f"Selected checkbox: '{opt_text}'")
+            clicked = True
+            break
+
+    if not clicked:
+        answer_lower = answer.lower().strip()
+        for i, opt_text in enumerate(options):
+            if answer_lower in opt_text.lower() or opt_text.lower() in answer_lower:
+                el = elements[i]
+                try:
+                    cb_input = el.find_element(By.CSS_SELECTOR, "input[type='checkbox']")
+                    driver.execute_script("arguments[0].click();", cb_input)
+                except Exception:
+                    driver.execute_script("arguments[0].click();", el)
+                logging.info(f"Selected checkbox (substring): '{opt_text}'")
+                clicked = True
+                break
+
+    if not clicked and elements:
+        el = elements[0]
+        try:
+            cb_input = el.find_element(By.CSS_SELECTOR, "input[type='checkbox']")
+            driver.execute_script("arguments[0].click();", cb_input)
+        except Exception:
+            driver.execute_script("arguments[0].click();", el)
+        logging.info(f"Selected first checkbox as fallback: '{options[0]}'")
+        clicked = True
+
+    if clicked:
+        time.sleep(random.uniform(0.8, 1.5))
+        _click_naukri_save_button(driver, chatbot_info)
+        log_qa(job_title, company, question_text, "checkbox", str(matched or answer), source, config_key)
+
+    return clicked
+
+
+def _handle_date_question(driver, chatbot_info, question_text, job_title, company, resume_context):
+    """Handle date-of-birth / date questions with multiple selector strategies.
+
+    Reads DOB from: .env DATE_OF_BIRTH -> screening config -> Ollama -> fallback.
+    Tries multiple input patterns: dedicated DOB container, date input, text input.
+    Returns True if handled.
+    """
+    env_dob = os.getenv("DATE_OF_BIRTH", "").strip()
+    answer = env_dob if env_dob else None
+    source = "env" if answer else None
+    config_key = None
+
+    if not answer:
+        answer, config_key, _ = match_config(question_text)
+        source = "config" if answer else None
+
+    if not answer:
+        answer = ask_ollama(question_text, [], resume_context)
+        source = "ollama" if answer else None
+
+    if not answer:
+        answer = "01/01/1995"
+        source = "fallback"
+
+    date_input_selectors = [
+        "ul[id*='dob__input-container']",
+        "input[type='date']",
+        "input[placeholder*='DD']",
+        "input[placeholder*='dd/mm']",
+        "input[placeholder*='MM/DD']",
+        "input[placeholder*='YYYY']",
+        "[class*='datePicker'] input",
+        "[class*='date-picker'] input",
+        "[class*='dateInput'] input",
+    ]
+
+    for sel in date_input_selectors:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                if el.is_displayed():
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+                    el.click()
+                    time.sleep(random.uniform(0.3, 0.6))
+                    el.send_keys(str(answer))
+                    time.sleep(random.uniform(0.5, 1.0))
+                    _click_naukri_save_button(driver, chatbot_info)
+                    log_qa(job_title, company, question_text, "date", answer, source, config_key)
+                    logging.info(f"Entered date: '{answer}' via {sel}")
+                    return True
+        except Exception:
+            continue
+
+    return False
+
+
 def _type_into_text_input(driver, chatbot_info, answer):
     """Try to type an answer into the chatbot text input. Returns True on success."""
 
@@ -1096,14 +1349,16 @@ def _type_into_text_input(driver, chatbot_info, answer):
 
 
 def _handle_naukri_chatbot(driver, chatbot_info, job_title, company, resume_context):
-    """Handle Naukri's chatbot questionnaire using verified selectors.
+    """Handle Naukri's chatbot questionnaire using detect-first approach.
 
-    Supports three question types that alternate:
-      1. Radio/MCQ questions   -> detect .ssrc__radio-btn-container, select answer, click save
-      2. Clickable options     -> detect option buttons/chips (e.g., city selection), click matching
-      3. Text questions        -> type into div.textArea or input field, click save
+    Each iteration:
+      1. Detect what input type is currently visible (radio/checkbox/date/text)
+      2. Get the question text
+      3. Get an answer from config -> Ollama -> fallback
+      4. Interact with the detected input type
+      5. Click save
 
-    Loops until success message or max iterations.
+    Falls back to clickable option scanning and AI if detection finds nothing.
     """
 
     max_iterations = 20
@@ -1119,88 +1374,12 @@ def _handle_naukri_chatbot(driver, chatbot_info, job_title, company, resume_cont
             save_screenshot(driver, f"chatbot_success_{company.replace(' ', '_')[:20]}", "success")
             return True
 
-        # --- Phase 1: Detect if this is a radio-button question ---
-        radio_handled = False
-        try:
-            radio_containers = driver.find_elements(By.CSS_SELECTOR, ".ssrc__radio-btn-container")
-            visible_radios = [r for r in radio_containers if r.is_displayed()]
+        # --- Step 1: Detect visible input type ---
+        input_type, input_elements = _detect_visible_input_type(driver)
+        if input_type:
+            logging.debug(f"Detected input type: {input_type} ({len(input_elements)} elements)")
 
-            if visible_radios:
-                question_text = _get_chatbot_question_text(driver, chatbot_info, previous_questions)
-                if not question_text:
-                    question_text = "Unknown radio question"
-
-                previous_questions.add(question_text)
-                logging.info(f"Chatbot Q{iteration+1} [radio]: '{question_text[:100]}'")
-
-                options = []
-                for rc in visible_radios:
-                    try:
-                        label = rc.find_element(By.CSS_SELECTOR, "label")
-                        options.append(label.text.strip())
-                    except Exception:
-                        try:
-                            inp = rc.find_element(By.CSS_SELECTOR, "input")
-                            options.append(inp.get_attribute("value") or "")
-                        except Exception:
-                            pass
-
-                logging.info(f"Radio options: {options}")
-
-                answer, config_key, _ = match_config(question_text)
-                source = "config"
-
-                if answer is None:
-                    source = "ollama"
-                    config_key = None
-                    answer = ask_ollama(question_text, options, resume_context)
-
-                if not answer and options:
-                    answer = options[0]
-                    source = "fallback"
-
-                matched = _fuzzy_match_option(answer, options) if options else answer
-                clicked = False
-                for i, rc in enumerate(visible_radios):
-                    label_text = options[i] if i < len(options) else ""
-                    if matched and label_text.lower().strip() == matched.lower().strip():
-                        try:
-                            radio_input = rc.find_element(By.CSS_SELECTOR, "input")
-                            driver.execute_script("arguments[0].click();", radio_input)
-                            logging.info(f"Selected radio: '{label_text}'")
-                            clicked = True
-                            break
-                        except Exception:
-                            driver.execute_script("arguments[0].click();", rc)
-                            clicked = True
-                            break
-
-                if not clicked and visible_radios:
-                    try:
-                        first_input = visible_radios[0].find_element(By.CSS_SELECTOR, "input")
-                        driver.execute_script("arguments[0].click();", first_input)
-                        logging.info(f"Selected first radio as fallback: '{options[0] if options else 'N/A'}'")
-                        clicked = True
-                    except Exception:
-                        driver.execute_script("arguments[0].click();", visible_radios[0])
-                        clicked = True
-
-                if clicked:
-                    time.sleep(random.uniform(0.8, 1.5))
-                    _click_naukri_save_button(driver, chatbot_info)
-                    answered_count += 1
-                    radio_handled = True
-                    consecutive_failures = 0
-
-                log_qa(job_title, company, question_text, "radio", str(matched or answer), source, config_key)
-
-        except Exception as e:
-            logging.debug(f"Radio detection pass: {e}")
-
-        if radio_handled:
-            continue
-
-        # --- Phase 2: Get the question text ---
+        # --- Step 2: Get the question text ---
         question_text = _get_chatbot_question_text(driver, chatbot_info, previous_questions)
 
         if not question_text:
@@ -1212,94 +1391,158 @@ def _handle_naukri_chatbot(driver, chatbot_info, job_title, company, resume_cont
 
         consecutive_failures = 0
         previous_questions.add(question_text)
-        logging.info(f"Chatbot Q{iteration+1} [text]: '{question_text[:100]}'")
-
-        # --- Phase 3: Check for special question types ---
         question_lower = question_text.lower()
+        logging.info(f"Chatbot Q{iteration+1} [{input_type or 'unknown'}]: '{question_text[:100]}'")
 
-        if "date of birth" in question_lower or "dob" in question_lower:
-            try:
-                dob_input = driver.find_element(By.CSS_SELECTOR, "ul[id*='dob__input-container']")
-                if dob_input.is_displayed():
-                    answer, config_key, _ = match_config(question_text)
-                    source = "config"
-                    if not answer:
-                        answer = "01/01/1995"
-                        source = "fallback"
-                    dob_input.send_keys(answer)
-                    time.sleep(random.uniform(0.5, 1.0))
-                    _click_naukri_save_button(driver, chatbot_info)
-                    answered_count += 1
-                    log_qa(job_title, company, question_text, "dob", answer, source, config_key)
-                    continue
-            except Exception:
-                pass
+        # --- Step 3: Handle by detected input type ---
+        handled = False
 
-        # --- Phase 4: Get answer from config/Ollama ---
-        answer, config_key, _ = match_config(question_text)
-        source = "config"
-
-        if answer is None:
-            source = "ollama"
-            config_key = None
-            answer = ask_ollama(question_text, [], resume_context)
-
-        if not answer:
-            answer = "N/A"
-            source = "fallback"
-            logging.warning(f"No answer for: '{question_text[:80]}', using fallback")
-
-        # --- Phase 5: Try typing into text input ---
-        typed = _type_into_text_input(driver, chatbot_info, answer)
-
-        # --- Phase 6: If no text input, try clickable option buttons ---
-        if not typed:
-            logging.info("Text input not available, checking for clickable option buttons...")
-            clicked_option = _find_clickable_option_buttons(driver, answer)
-
-            if not clicked_option:
-                logging.info("Standard option selectors failed, trying AI...")
-                clicked_option = _ai_find_and_click_option(driver, answer, question_text)
-
-            if clicked_option:
-                time.sleep(random.uniform(0.8, 1.5))
-                save_needed = True
+        # --- RADIO ---
+        if input_type == "radio" and input_elements:
+            options = []
+            for rc in input_elements:
                 try:
-                    if _check_application_success(driver):
-                        save_needed = False
+                    label = rc.find_element(By.CSS_SELECTOR, "label")
+                    options.append(label.text.strip())
                 except Exception:
-                    pass
-                if save_needed:
-                    _click_naukri_save_button(driver, chatbot_info)
+                    try:
+                        inp = rc.find_element(By.CSS_SELECTOR, "input")
+                        options.append(inp.get_attribute("value") or "")
+                    except Exception:
+                        pass
+
+            logging.info(f"Radio options: {options}")
+
+            answer, config_key, _ = match_config(question_text)
+            source = "config"
+            if answer is None:
+                source = "ollama"
+                config_key = None
+                answer = ask_ollama(question_text, options, resume_context)
+            if not answer and options:
+                answer = options[0]
+                source = "fallback"
+
+            matched = _fuzzy_match_option(answer, options) if options else answer
+            clicked = False
+            for i, rc in enumerate(input_elements):
+                label_text = options[i] if i < len(options) else ""
+                if matched and label_text.lower().strip() == matched.lower().strip():
+                    try:
+                        radio_input = rc.find_element(By.CSS_SELECTOR, "input")
+                        driver.execute_script("arguments[0].click();", radio_input)
+                    except Exception:
+                        driver.execute_script("arguments[0].click();", rc)
+                    logging.info(f"Selected radio: '{label_text}'")
+                    clicked = True
+                    break
+
+            if not clicked and input_elements:
+                try:
+                    first_input = input_elements[0].find_element(By.CSS_SELECTOR, "input")
+                    driver.execute_script("arguments[0].click();", first_input)
+                except Exception:
+                    driver.execute_script("arguments[0].click();", input_elements[0])
+                logging.info(f"Selected first radio as fallback: '{options[0] if options else 'N/A'}'")
+                clicked = True
+
+            if clicked:
+                time.sleep(random.uniform(0.8, 1.5))
+                _click_naukri_save_button(driver, chatbot_info)
                 answered_count += 1
-                log_qa(job_title, company, question_text, "chatbot_option_click", answer, source, config_key)
+                handled = True
+
+            log_qa(job_title, company, question_text, "radio", str(matched or answer), source, config_key)
+
+        # --- CHECKBOX ---
+        elif input_type == "checkbox":
+            answer, config_key, _ = match_config(question_text)
+            source = "config"
+            if answer is None:
+                source = "ollama"
+                config_key = None
+                answer = ask_ollama(question_text, [], resume_context)
+            if not answer:
+                answer = "N/A"
+                source = "fallback"
+
+            handled = _handle_checkbox_question(
+                driver, chatbot_info, question_text, answer,
+                job_title, company, source, config_key
+            )
+            if handled:
+                answered_count += 1
+
+        # --- DATE ---
+        elif input_type == "date" or "date of birth" in question_lower or "dob" in question_lower or "birthday" in question_lower:
+            handled = _handle_date_question(
+                driver, chatbot_info, question_text,
+                job_title, company, resume_context
+            )
+            if handled:
+                answered_count += 1
+
+        # --- TEXT ---
+        if not handled:
+            answer, config_key, _ = match_config(question_text)
+            source = "config"
+            if answer is None:
+                source = "ollama"
+                config_key = None
+                answer = ask_ollama(question_text, [], resume_context)
+            if not answer:
+                answer = "N/A"
+                source = "fallback"
+                logging.warning(f"No answer for: '{question_text[:80]}', using fallback")
+
+            typed = _type_into_text_input(driver, chatbot_info, answer)
+
+            if not typed:
+                logging.info("Text input not available, checking for clickable option buttons...")
+                clicked_option = _find_clickable_option_buttons(driver, answer)
+
+                if not clicked_option:
+                    logging.info("Standard option selectors failed, trying AI...")
+                    clicked_option = _ai_find_and_click_option(driver, answer, question_text)
+
+                if clicked_option:
+                    time.sleep(random.uniform(0.8, 1.5))
+                    save_needed = True
+                    try:
+                        if _check_application_success(driver):
+                            save_needed = False
+                    except Exception:
+                        pass
+                    if save_needed:
+                        _click_naukri_save_button(driver, chatbot_info)
+                    answered_count += 1
+                    log_qa(job_title, company, question_text, "chatbot_option_click", answer, source, config_key)
+                    continue
+
+            if not typed:
+                logging.warning("All input methods failed, asking AI to identify page state...")
+                page_state = _ai_identify_page_state(driver, chatbot_info.get("container"))
+                if page_state == "success":
+                    logging.info("AI detected success page despite no typing")
+                    return True
+                elif page_state in ("error", "already_applied"):
+                    logging.info(f"AI detected page state: {page_state}, stopping")
+                    return False
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    logging.info("Repeated failures, finishing chatbot")
+                    break
                 continue
 
-        # --- Phase 7: If nothing worked, check page state ---
-        if not typed:
-            logging.warning("All input methods failed, asking AI to identify page state...")
-            page_state = _ai_identify_page_state(driver, chatbot_info.get("container"))
-            if page_state == "success":
-                logging.info("AI detected success page despite no typing")
-                return True
-            elif page_state in ("error", "already_applied"):
-                logging.info(f"AI detected page state: {page_state}, stopping")
-                return False
-            consecutive_failures += 1
-            if consecutive_failures >= 3:
-                logging.info("Repeated failures, finishing chatbot")
-                break
-            continue
+            if typed:
+                time.sleep(random.uniform(0.5, 1.0))
+                _click_naukri_save_button(driver, chatbot_info)
+                answered_count += 1
+                _wait_for_dom_settle(driver, (1.0, 2.0))
 
-        if typed:
-            time.sleep(random.uniform(0.5, 1.0))
-            _click_naukri_save_button(driver, chatbot_info)
-            answered_count += 1
-            _wait_for_dom_settle(driver, (1.0, 2.0))
+            log_qa(job_title, company, question_text, "chatbot_text", answer, source, config_key)
 
-        log_qa(job_title, company, question_text, "chatbot_text", answer, source, config_key)
-
-    # Final success check (use AI on this final check since it's the deciding moment)
+    # Final success check
     time.sleep(random.uniform(2, 4))
     if _check_application_success(driver, use_ai=True):
         logging.info(f"Chatbot completed: answered {answered_count} questions, application successful")

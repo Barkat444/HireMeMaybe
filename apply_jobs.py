@@ -1,39 +1,88 @@
 import random
+import re
 import time
 import os
 import logging
 from datetime import datetime, timedelta
+from urllib.parse import quote_plus
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
-from selenium.webdriver.common.keys import Keys
+from selenium.common.exceptions import TimeoutException
 from utils import init_driver, login, save_screenshot
 from rotate_headline import setup_logging, clear_debug_images
 from questionnaire_handler import handle_questionnaire
 
-APPLIED_JOBS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "applied_jobs.txt")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DEBUG_DIR = os.path.join(SCRIPT_DIR, "debug")
+APPLIED_JOBS_FILE = os.path.join(DEBUG_DIR, "applied_jobs.txt")
+
+os.makedirs(DEBUG_DIR, exist_ok=True)
 
 GENERIC_TITLE_WORDS = {
     "engineer", "developer", "manager", "lead", "senior", "junior",
     "associate", "principal", "staff", "intern", "analyst", "specialist",
     "consultant", "architect", "administrator", "admin", "coordinator",
-    "director", "head", "vp",
+    "director", "head", "vp", "mid", "level", "i", "ii", "iii",
+}
+
+COMMON_ABBREVIATIONS = {
+    "site reliability engineer": ["sre"],
+    "site reliability": ["sre"],
+    "devops engineer": ["devops", "dev ops", "dev-ops"],
+    "devops": ["dev ops", "dev-ops"],
+    "machine learning": ["ml"],
+    "artificial intelligence": ["ai"],
+    "data engineer": ["data engineering"],
+    "data scientist": ["data science"],
+    "quality assurance": ["qa"],
+    "user experience": ["ux"],
+    "user interface": ["ui"],
+    "full stack": ["fullstack", "full-stack"],
+    "front end": ["frontend", "front-end"],
+    "back end": ["backend", "back-end"],
+    "business analyst": ["ba"],
+    "project manager": ["pm"],
+    "product manager": ["pm"],
+    "technical lead": ["tech lead"],
+    "software development engineer in test": ["sdet"],
+    "database administrator": ["dba"],
 }
 
 
 def build_relevance_keywords(job_titles):
-    """Build keyword set from configured job titles for relevance checking.
-    Keeps full title phrases and individual significant words (filtering out
-    generic role-level words like 'engineer', 'senior', etc.)."""
+    """Build keyword set dynamically from whatever job titles the user configures.
+
+    Strategy:
+    1. Full title phrases as-is (highest priority during matching)
+    2. Multi-word domain phrases (non-generic words joined, e.g., 'site reliability')
+    3. Hyphenated/compact variants (e.g., 'devops' from 'dev ops')
+    4. Known abbreviations if the title matches (e.g., 'sre' from 'site reliability engineer')
+    5. Individual significant words (>=4 chars, not in GENERIC_TITLE_WORDS)
+    """
     keywords = set()
+
     for title in job_titles:
-        keywords.add(title.lower().strip())
-    for title in job_titles:
-        for word in title.lower().split():
-            word = word.strip()
-            if word and word not in GENERIC_TITLE_WORDS and len(word) > 2:
+        title_lower = title.lower().strip()
+        keywords.add(title_lower)
+
+        words = title_lower.split()
+        significant = [w for w in words if w not in GENERIC_TITLE_WORDS and len(w) > 2]
+
+        if len(significant) >= 2:
+            phrase = " ".join(significant)
+            keywords.add(phrase)
+            keywords.add(phrase.replace(" ", "-"))
+            keywords.add(phrase.replace(" ", ""))
+
+        for known_phrase, abbrevs in COMMON_ABBREVIATIONS.items():
+            if known_phrase in title_lower:
+                keywords.update(abbrevs)
+
+        for word in significant:
+            if len(word) >= 4:
                 keywords.add(word)
+
     return keywords
 
 
@@ -48,7 +97,13 @@ def is_job_relevant(text, relevance_keywords):
 
 
 def load_applied_jobs():
-    """Load previously applied job URLs from the dedup file."""
+    """Load previously applied job URLs from the dedup file.
+    Handles migration from old root-level location to debug/."""
+    old_path = os.path.join(SCRIPT_DIR, "applied_jobs.txt")
+    if os.path.exists(old_path) and not os.path.exists(APPLIED_JOBS_FILE):
+        os.rename(old_path, APPLIED_JOBS_FILE)
+        logging.info("Migrated applied_jobs.txt to debug/ folder")
+
     if not os.path.exists(APPLIED_JOBS_FILE):
         return set()
     with open(APPLIED_JOBS_FILE, "r", encoding="utf-8") as f:
@@ -61,280 +116,138 @@ def save_applied_job(job_url):
         f.write(job_url + "\n")
 
 
-def apply_for_jobs():
+def build_search_url(job_title, location, experience, freshness_days=1):
+    """Build a Naukri search URL with all filters baked in.
+
+    URL pattern (confirmed working):
+      https://www.naukri.com/{slug}-jobs-in-{location}?k={keyword}&l={location}&experience={exp}&jobAge={days}
+
+    Naukri defaults to 'Recommended' sort which blends relevance with recency.
     """
-    Searches for jobs on Naukri.com based on config in .env file and applies to them
+    slug = re.sub(r"[^a-z0-9]+", "-", job_title.lower()).strip("-")
+    loc_slug = re.sub(r"[^a-z0-9]+", "-", location.lower()).strip("-")
+    keyword_encoded = quote_plus(job_title)
+    loc_encoded = quote_plus(location)
+
+    return (
+        f"https://www.naukri.com/{slug}-jobs-in-{loc_slug}"
+        f"?k={keyword_encoded}&l={loc_encoded}"
+        f"&experience={experience}&jobAge={freshness_days}"
+    )
+
+
+def apply_for_jobs():
+    """Search Naukri.com for jobs and apply.
+
+    Flow:
+    1. Log in
+    2. For each job title, build a URL with keyword + location + experience + freshness
+    3. Navigate directly (no UI filter clicking) -- Naukri defaults to 'Recommended' sort
+    4. Process listings with strict relevance checks
+    5. Paginate if needed, try next title if quota not met
     """
     setup_logging()
     clear_debug_images()
-    
+
     job_titles = os.getenv("JOB_TITLES", "DevOps Engineer, Site Reliability Engineer").split(",")
-    job_titles = [title.strip() for title in job_titles]
-    
+    job_titles = [title.strip() for title in job_titles if title.strip()]
+
     locations = os.getenv("JOB_LOCATIONS", "Remote").split(",")
-    locations = [location.strip() for location in locations]
-    
+    locations = [loc.strip() for loc in locations if loc.strip()]
+
     experience = os.getenv("JOB_EXPERIENCE", "2")
-    
-    applied_count = 0
     max_applications = int(os.getenv("MAX_APPLICATIONS", "3"))
-    
+    freshness_days = int(os.getenv("JOB_FRESHNESS_DAYS", "1"))
+
     relevance_keywords = build_relevance_keywords(job_titles)
     logging.info(f"Relevance keywords: {relevance_keywords}")
-    
+
     applied_jobs = load_applied_jobs()
     logging.info(f"Loaded {len(applied_jobs)} previously applied job URLs for deduplication")
-    
+
+    applied_count = 0
     driver = init_driver()
-    
+
     try:
         logging.info("Attempting to log in to Naukri.com")
         if not login(driver):
             logging.error("Login failed. Exiting job application process.")
             return 0
         logging.info("Logged in successfully")
-        
+
         driver.get("https://www.naukri.com/mnjuser/profile")
         logging.info("Navigated to profile page")
         time.sleep(random.uniform(4, 7))
-        
-        selected_job_title = random.choice(job_titles)
-        selected_location = random.choice(locations)
-        
-        logging.info(f"Selected job search parameters: {selected_job_title} in {selected_location} with {experience} years experience")
-        logging.info(f"Target: Apply to {max_applications} jobs")
-        
-        search_for_jobs(driver, selected_job_title, selected_location, experience)
-        
-        applied_count = process_job_listings(driver, max_applications, relevance_keywords, applied_jobs)
-        
-        search_attempts = 1
-        max_search_attempts = 3
-        
-        while applied_count < max_applications and search_attempts < max_search_attempts:
-            logging.info(f"Only applied to {applied_count}/{max_applications} jobs. Trying a different search...")
-            search_attempts += 1
-            
-            selected_job_title = random.choice([title for title in job_titles if title != selected_job_title] or job_titles)
-            selected_location = random.choice([loc for loc in locations if loc != selected_location] or locations)
-            
-            logging.info(f"New search parameters: {selected_job_title} in {selected_location} with {experience} years experience")
-            
-            search_for_jobs(driver, selected_job_title, selected_location, experience, fallback=True)
-            
-            new_applications = process_job_listings(driver, max_applications - applied_count, relevance_keywords, applied_jobs)
-            applied_count += new_applications
-        
+
+        logging.info(f"Target: Apply to {max_applications} jobs across {len(job_titles)} title(s)")
+
+        random.shuffle(job_titles)
+
+        for title in job_titles:
+            if applied_count >= max_applications:
+                break
+
+            location = random.choice(locations)
+            search_url = build_search_url(title, location, experience, freshness_days)
+            logging.info(f"Searching: '{title}' in {location} (exp={experience}, fresh={freshness_days}d)")
+            logging.info(f"URL: {search_url}")
+
+            search_for_jobs(driver, search_url)
+
+            remaining = max_applications - applied_count
+            new_apps = process_job_listings(driver, remaining, relevance_keywords, applied_jobs)
+            applied_count += new_apps
+
+            if applied_count < max_applications:
+                time.sleep(random.uniform(3, 6))
+
         if applied_count >= max_applications:
-            logging.info(f"✓ Successfully applied to {applied_count} jobs (reached target of {max_applications})")
+            logging.info(f"Successfully applied to {applied_count} jobs (reached target of {max_applications})")
         else:
             logging.info(f"Applied to {applied_count} jobs (target was {max_applications})")
-        
+
     except Exception as e:
         logging.error(f"Error during job application process: {e}")
         save_screenshot(driver, "job_application_error", "failure")
     finally:
         driver.quit()
         logging.info("Browser closed")
-        
+
         interval_hours = int(os.getenv("INTERVAL_HOURS", "1"))
         if interval_hours > 0:
             next_run = datetime.now() + timedelta(hours=interval_hours)
             logging.info(f"Next scheduled run: {next_run.strftime('%Y-%m-%d %H:%M:%S')}")
             logging.info(f"Will run every {interval_hours} hour(s)")
-    
+
     return applied_count
 
-def search_for_jobs(driver, job_title, location, experience, fallback=False):
+def search_for_jobs(driver, search_url):
+    """Navigate directly to a pre-built Naukri search URL.
+
+    All filters (keyword, location, experience, freshness) are in the URL.
+    Naukri defaults to 'Recommended' sort which is the best blend of
+    relevance + recency. No UI clicking needed.
     """
-    Searches for jobs using the search box on Naukri.
-    If fallback is True, the sort will be set to "Date" instead of "Relevance".
-    """
-    logging.info("Starting job search...")
-    
+    logging.info("Navigating to search results...")
+
     try:
-        try:
-            search_placeholder_elements = driver.find_elements(By.XPATH, 
-                "//span[contains(@class, 'nI-gNb-sb__placeholder') and contains(text(), 'Search jobs here')]")
-            
-            if search_placeholder_elements:
-                search_placeholder_elements[0].click()
-                logging.info("Clicked on 'Search jobs here'")
-                time.sleep(random.uniform(1.5, 3.5))
-            else:
-                search_icon = driver.find_element(By.CSS_SELECTOR, ".nI-gNb-sb__icon-wrapper")
-                search_icon.click()
-                logging.info("Clicked on search icon as fallback")
-                time.sleep(random.uniform(1.5, 3.5))
-                
-        except Exception as e:
-            logging.error(f"Failed to find search elements: {e}")
-            save_screenshot(driver, "search_elements_not_found", "failure")
-            
-            try:
-                driver.get("https://www.naukri.com/jobs-in-india")
-                logging.info("Navigated directly to job search page")
-                time.sleep(random.uniform(2.5, 5))
-            except Exception as e:
-                logging.error(f"Failed to navigate to job search page: {e}")
-                save_screenshot(driver, "search_page_navigation_failed", "failure")
-                raise
-        
-        try:
-            keywords_inputs = driver.find_elements(By.XPATH, 
-                "//input[@placeholder='Enter keyword / designation / companies']")
-            
-            if not keywords_inputs:
-                keywords_inputs = driver.find_elements(By.CSS_SELECTOR, ".keywordSugg input")
-                
-            if keywords_inputs:
-                keywords_input = keywords_inputs[0]
-                keywords_input.clear()
-                keywords_input.send_keys(job_title)
-                keywords_input.send_keys(Keys.TAB)
-                logging.info(f"Entered job title: '{job_title}'")
-                time.sleep(random.uniform(1, 2.5))
-            else:
-                logging.error("Could not find keywords input field")
-                save_screenshot(driver, "keywords_input_not_found", "failure")
-        except Exception as e:
-            logging.error(f"Failed to enter job title: {e}")
-            save_screenshot(driver, "job_title_input_error", "failure")
-        
-        try:
-            exp_input = driver.find_element(By.ID, "experienceDD")
-            driver.execute_script("arguments[0].click();", exp_input)
-            logging.info("Clicked on experience dropdown")
-            time.sleep(random.uniform(1, 2.5))
-            
-            options = driver.find_elements(By.CSS_SELECTOR, ".dropdownMainContainer .dropdownPrimary ul li")
-            
-            if not options:
-                options = driver.find_elements(By.XPATH, "//div[contains(@class, 'dropdownPrimary')]//li")
+        driver.get(search_url)
+        time.sleep(random.uniform(4, 7))
 
-            if options:
-                target_exp = int(experience)
-                selected = False
-                
-                for option in options:
-                    option_text = option.text.strip().lower()
-                    
-                    is_fresher = (target_exp == 0 and "fresher" in option_text)
-                    is_match = (f"{target_exp} year" in option_text)
-
-                    if is_fresher or is_match:
-                        driver.execute_script("arguments[0].scrollIntoView(true);", option)
-                        option.click()
-                        selected = True
-                        logging.info(f"Successfully selected experience: {option_text}")
-                        break
-                
-                if not selected:
-                    logging.warning(f"Target experience {experience} not found. Selecting first option.")
-                    options[0].click()
-            else:
-                logging.error("No experience options found in the DOM.")
-                
-        except Exception as e:
-            logging.error(f"Failed to select experience: {e}")
-            save_screenshot(driver, "experience_selection_error", "failure")
-        
         try:
-            location_inputs = driver.find_elements(By.XPATH, 
-                "//input[@placeholder='Enter location']")
-            
-            if not location_inputs:
-                location_inputs = driver.find_elements(By.CSS_SELECTOR, ".locationSugg input")
-                
-            if location_inputs:
-                location_input = location_inputs[0]
-                location_input.clear()
-                location_input.send_keys(location)
-                location_input.send_keys(Keys.TAB)
-                logging.info(f"Entered location: '{location}'")
-                time.sleep(random.uniform(1, 2.5))
-            else:
-                logging.warning("Location input field not found")
-        except Exception as e:
-            logging.error(f"Failed to enter location: {e}")
-            save_screenshot(driver, "location_input_error", "failure")
-        
-        try:
-            search_buttons = driver.find_elements(By.CSS_SELECTOR, 
-                ".nI-gNb-sb__icon-wrapper, button.search, input[type='submit'], button[type='submit']")
-            
-            if search_buttons:
-                search_button = search_buttons[0]
-                search_button.click()
-                logging.info("Clicked search button")
-                
-                time.sleep(random.uniform(4, 7))
-                
-                try:
-                    WebDriverWait(driver, 20).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, 
-                            ".jobTupleHeader, .cust-job-tuple, .jobTuple, div[type='tuple']"))
-                    )
-                    logging.info("Search results loaded successfully")
-                except TimeoutException:
-                    logging.warning("Timed out waiting for search results, but proceeding anyway")
-                
-                save_screenshot(driver, "job_search_results", "success")
-            else:
-                logging.error("Search button not found")
-                save_screenshot(driver, "search_button_not_found", "failure")
-        except Exception as e:
-            logging.error(f"Failed to complete search: {e}")
-            save_screenshot(driver, "search_button_click_error", "failure")
-        
-        try:
-            freshness_dropdown_button = driver.find_element(By.ID, "filter-freshness")
-            driver.execute_script("arguments[0].click();", freshness_dropdown_button)
-            logging.info("Clicked on freshness dropdown")
-            time.sleep(random.uniform(1, 2.5))
-            
-            freshness_options = driver.find_elements(By.CSS_SELECTOR, "ul[data-filter-id='freshness'] li")
-            for option in freshness_options:
-                if "Last 1 day" in option.text:
-                    driver.execute_script("arguments[0].click();", option)
-                    logging.info("Selected freshness: Last 1 day")
-                    break
-            else:
-                logging.warning("Freshness option 'Last 1 day' not found")
-        except Exception as e:
-            logging.error(f"Failed to select freshness: {e}")
-            save_screenshot(driver, "freshness_selection_error", "failure")
-        
-        try:
-            sort_dropdown_button = driver.find_element(By.ID, "filter-sort")
-            driver.execute_script("arguments[0].click();", sort_dropdown_button)
-            logging.info("Clicked on sort dropdown")
-            time.sleep(random.uniform(1, 2.5))
-            
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_all_elements_located((By.CSS_SELECTOR, "ul[data-filter-id='sort'] li"))
+            WebDriverWait(driver, 20).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR,
+                    ".srp-jobtuple-wrapper, .jobTupleHeader, .cust-job-tuple, "
+                    ".jobTuple, div[type='tuple']"))
             )
-            
-            sort_options = driver.find_elements(By.CSS_SELECTOR, "ul[data-filter-id='sort'] li")
-            available_sort_options = [option.get_attribute("title") for option in sort_options]
-            logging.info(f"Available sort options: {available_sort_options}")
-            
-            target_sort = "Date" if fallback else "Relevance"
-            for option in sort_options:
-                if option.get_attribute("title") == target_sort:
-                    driver.execute_script("arguments[0].click();", option)
-                    logging.info(f"Selected sort: {target_sort}")
-                    time.sleep(random.uniform(3, 6))
-                    break
-            else:
-                logging.warning(f"Sort option '{target_sort}' not found. Available options: {available_sort_options}")
-                save_screenshot(driver, f"sort_option_not_found_{target_sort}", "failure")
-        except Exception as e:
-            logging.error(f"Failed to select sort: {e}")
-            save_screenshot(driver, "sort_selection_error", "failure")
-        
+            logging.info("Search results loaded successfully")
+        except TimeoutException:
+            logging.warning("Timed out waiting for search results, proceeding anyway")
+
+        save_screenshot(driver, "job_search_results", "success")
+
     except Exception as e:
-        logging.error(f"Error in job search process: {e}")
+        logging.error(f"Error loading search results: {e}")
         save_screenshot(driver, "job_search_error", "failure")
 
 def process_job_listings(driver, max_applications, relevance_keywords, applied_jobs, page=1, max_pages=3):
@@ -348,11 +261,12 @@ def process_job_listings(driver, max_applications, relevance_keywords, applied_j
     
     try:
         job_selectors = [
-            ".jobTuple", 
-            ".cust-job-tuple", 
-            "div[type='tuple']", 
+            ".srp-jobtuple-wrapper",
+            ".jobTuple",
+            ".cust-job-tuple",
+            "div[type='tuple']",
             ".jobTupleHeader",
-            "article.jobTupleHeader"
+            "article.jobTupleHeader",
         ]
         
         job_listings = []
@@ -509,14 +423,12 @@ def check_and_apply(driver, job_title, company, relevance_keywords, title_releva
                 if jd_elements:
                     jd_text = jd_elements[0].text.strip()
                     break
-            
+
             if not jd_text:
-                try:
-                    body = driver.find_element(By.TAG_NAME, "body")
-                    jd_text = body.text[:3000]
-                except:
-                    jd_text = ""
-            
+                logging.info(f"⊘ Skipping irrelevant job: '{job_title}' at {company} - no JD container found")
+                save_screenshot(driver, f"skipped_irrelevant_{company.replace(' ', '_')[:20]}", "info")
+                return False
+
             jd_relevant, matched_keyword = is_job_relevant(jd_text, relevance_keywords)
             if not jd_relevant:
                 logging.info(f"⊘ Skipping irrelevant job: '{job_title}' at {company} - no keyword match in title or JD")

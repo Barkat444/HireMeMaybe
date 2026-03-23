@@ -133,7 +133,7 @@
       "type": "select_or_text"
     },
     {
-      "keywords": ["date of birth", "dob", "birth date"],
+      "keywords": ["date of birth", "dob", "birth date", "birthday"],
       "answer_key": "date_of_birth",
       "type": "text"
     },
