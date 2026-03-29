@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import random
@@ -107,6 +108,17 @@ def load_resume_text():
     return _resume_text_cache
 
 
+def _keyword_matches(kw_lower, question_lower):
+    """Check if keyword appears in question text.
+    Short keywords (<=5 chars) require word-boundary matching to avoid
+    false positives like 'age' matching 'package' or 'percentage'."""
+    if kw_lower not in question_lower:
+        return False
+    if len(kw_lower) <= 5:
+        return bool(re.search(r'\b' + re.escape(kw_lower) + r'\b', question_lower))
+    return True
+
+
 def match_config(question_text):
     """Match question text against screening_answers.json keyword patterns.
     Uses longest-match-wins strategy so specific keywords beat generic ones.
@@ -120,7 +132,7 @@ def match_config(question_text):
     for entry in config.get("questions", []):
         for keyword in entry["keywords"]:
             kw_lower = keyword.lower()
-            if kw_lower in question_lower and len(kw_lower) > best_keyword_len:
+            if _keyword_matches(kw_lower, question_lower) and len(kw_lower) > best_keyword_len:
                 answer_key = entry["answer_key"]
                 answer_value = config["profile"].get(answer_key, "")
                 if answer_value:
@@ -130,9 +142,33 @@ def match_config(question_text):
     return best_match if best_match else (None, None, None)
 
 
+def _sanitize_ollama_answer(answer):
+    """Clean up Ollama's response for safe typing into a chatbot input.
+    Strips newlines, meta-commentary, and excessive length."""
+    if not answer:
+        return ""
+
+    answer = " ".join(answer.split())
+
+    discard_phrases = [
+        "not mentioned", "no information", "not available", "not specified",
+        "cannot determine", "n/a", "the resume", "the candidate's resume",
+        "based on the resume", "according to the resume",
+    ]
+    answer_lower = answer.lower()
+    for phrase in discard_phrases:
+        if phrase in answer_lower and len(answer) > 50:
+            return ""
+
+    if len(answer) > 200:
+        answer = answer[:200].rsplit(" ", 1)[0]
+
+    return answer.strip()
+
+
 def ask_ollama(question_text, options, resume_context):
     """Call the local Ollama instance to answer a question.
-    Returns the answer string, or empty string on failure."""
+    Returns a sanitized answer string, or empty string on failure."""
     ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
     ollama_model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
 
@@ -143,15 +179,21 @@ def ask_ollama(question_text, options, resume_context):
 
     resume_section = ""
     if resume_context:
-        resume_section = f"\n\nCandidate Resume:\n{resume_context[:3000]}"
+        resume_section = f"\n\nCandidate Resume (use for context only):\n{resume_context[:3000]}"
 
     system_prompt = (
         "You are filling out a job application screening form on behalf of a candidate. "
-        "Answer concisely and accurately based on the candidate's resume. "
-        "For numeric questions, return ONLY the number. "
-        "For yes/no questions, return ONLY 'Yes' or 'No'. "
-        "For multiple choice, return ONLY the exact option text that best matches. "
-        "Do not add explanations, preamble, or extra text. Just the answer."
+        "Rules you MUST follow:\n"
+        "1. Answer in 1-5 words maximum. Be extremely concise.\n"
+        "2. For numeric questions (years, CTC, etc.), return ONLY the number.\n"
+        "3. For yes/no questions, return ONLY 'Yes' or 'No'.\n"
+        "4. For multiple choice, return ONLY the exact option text.\n"
+        "5. For skill/tool questions, list relevant ones separated by commas on a single line.\n"
+        "6. NEVER include explanations, preamble, reasoning, or meta-commentary.\n"
+        "7. NEVER expose personal information like email addresses, phone numbers, or home addresses.\n"
+        "8. NEVER say things like 'based on the resume' or 'not mentioned in the resume'.\n"
+        "9. If you don't know the answer, make a reasonable positive assumption.\n"
+        "10. Always answer on a SINGLE LINE, never use newlines or bullet points."
     )
 
     user_prompt = f"Question: {question_text}{options_text}{resume_section}"
@@ -172,8 +214,9 @@ def ask_ollama(question_text, options, resume_context):
         )
         response.raise_for_status()
         data = response.json()
-        answer = data.get("message", {}).get("content", "").strip()
-        logging.info(f"Ollama answered: '{answer}' for question: '{question_text[:80]}'")
+        raw_answer = data.get("message", {}).get("content", "").strip()
+        answer = _sanitize_ollama_answer(raw_answer)
+        logging.info(f"Ollama answered: '{answer}' (raw: '{raw_answer[:80]}') for question: '{question_text[:80]}'")
         return answer
     except requests.exceptions.ConnectionError:
         logging.error("Cannot connect to Ollama. Is it running? Check OLLAMA_URL in .env")
@@ -1096,6 +1139,43 @@ def _detect_visible_input_type(driver):
         pass
 
     try:
+        option_selectors = [
+            "li[class*='botItem'] button",
+            "li[class*='botItem'] div[class*='option']",
+            "[class*='chatOption']",
+            "[class*='suggestedOption']",
+            "[class*='chip']",
+            "[class*='Chip']",
+            "[class*='optionItem']",
+            "[class*='OptionItem']",
+            "[class*='option-btn']",
+            "[class*='optionBtn']",
+            "[class*='select-option']",
+            "[class*='multi-select'] li",
+            "[class*='multiSelect'] li",
+            "[class*='dropdown-option']",
+            "ul[class*='option'] li",
+            "div[class*='option'] span",
+            "div[role='option']",
+            "li[role='option']",
+            "button[class*='option']",
+            "[class*='ssrc__option']",
+        ]
+        visible_opts = []
+        for sel in option_selectors:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                for el in els:
+                    if el.is_displayed() and el.text.strip():
+                        visible_opts.append(el)
+            except Exception:
+                continue
+        if len(visible_opts) >= 2:
+            return "options", visible_opts
+    except Exception:
+        pass
+
+    try:
         text_selectors = [
             "div.textArea",
             "[class*='textArea']",
@@ -1481,6 +1561,53 @@ def _handle_naukri_chatbot(driver, chatbot_info, job_title, company, resume_cont
             )
             if handled:
                 answered_count += 1
+
+        # --- CLICKABLE OPTIONS (city chips, skill pills, etc.) ---
+        elif input_type == "options" and input_elements:
+            answer, config_key, _ = match_config(question_text)
+            source = "config"
+            if answer is None:
+                source = "ollama"
+                config_key = None
+                option_texts = [el.text.strip() for el in input_elements if el.text.strip()]
+                answer = ask_ollama(question_text, option_texts, resume_context)
+            if not answer:
+                answer = input_elements[0].text.strip() if input_elements else "N/A"
+                source = "fallback"
+
+            clicked_option = _find_clickable_option_buttons(driver, answer)
+
+            if not clicked_option:
+                answer_lower_opt = answer.lower().strip()
+                for el in input_elements:
+                    el_text = el.text.strip().lower()
+                    if answer_lower_opt in el_text or el_text in answer_lower_opt:
+                        try:
+                            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+                            time.sleep(random.uniform(0.3, 0.6))
+                            driver.execute_script("arguments[0].click();", el)
+                            logging.info(f"Clicked detected option element: '{el.text.strip()}'")
+                            clicked_option = True
+                            break
+                        except Exception:
+                            continue
+
+            if not clicked_option:
+                clicked_option = _ai_find_and_click_option(driver, answer, question_text)
+
+            if clicked_option:
+                time.sleep(random.uniform(0.8, 1.5))
+                save_needed = True
+                try:
+                    if _check_application_success(driver):
+                        save_needed = False
+                except Exception:
+                    pass
+                if save_needed:
+                    _click_naukri_save_button(driver, chatbot_info)
+                answered_count += 1
+                handled = True
+                log_qa(job_title, company, question_text, "chatbot_option_click", answer, source, config_key)
 
         # --- TEXT ---
         if not handled:

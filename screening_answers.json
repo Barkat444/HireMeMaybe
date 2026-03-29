@@ -138,7 +138,7 @@
       "type": "text"
     },
     {
-      "keywords": ["age", "how old"],
+      "keywords": ["your age", "how old", "what is your age", "current age"],
       "answer_key": "age",
       "type": "text"
     },

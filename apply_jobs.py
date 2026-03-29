@@ -3,6 +3,7 @@ import re
 import time
 import os
 import logging
+import requests
 from datetime import datetime, timedelta
 from urllib.parse import quote_plus
 from selenium.webdriver.common.by import By
@@ -86,14 +87,128 @@ def build_relevance_keywords(job_titles):
     return keywords
 
 
-def is_job_relevant(text, relevance_keywords):
-    """Check if text contains any relevance keyword.
-    Checks longer phrases first so full-title matches are preferred."""
+def is_job_relevant(text, relevance_keywords, strict=False):
+    """Check if text contains relevance keywords.
+
+    strict=False (titles): any single keyword match is enough.
+    strict=True  (JD text): requires either a multi-word phrase match (>=2 words)
+                            OR at least 2 distinct single-word keyword hits.
+    """
     text_lower = text.lower()
-    for keyword in sorted(relevance_keywords, key=len, reverse=True):
-        if keyword in text_lower:
+    sorted_kws = sorted(relevance_keywords, key=len, reverse=True)
+
+    if not strict:
+        for keyword in sorted_kws:
+            if keyword in text_lower:
+                return True, keyword
+        return False, None
+
+    for keyword in sorted_kws:
+        if " " in keyword and keyword in text_lower:
             return True, keyword
+
+    single_hits = []
+    for keyword in sorted_kws:
+        if " " not in keyword and keyword in text_lower:
+            single_hits.append(keyword)
+            if len(single_hits) >= 2:
+                return True, f"{single_hits[0]}+{single_hits[1]}"
+
     return False, None
+
+
+_ollama_available = None
+
+
+def _is_ollama_available():
+    """Check if Ollama is reachable. Result is cached for the entire session
+    so we don't repeatedly timeout when Ollama isn't running."""
+    global _ollama_available
+    if _ollama_available is not None:
+        return _ollama_available
+
+    ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+    try:
+        resp = requests.get(f"{ollama_url}/api/tags", timeout=3)
+        _ollama_available = resp.status_code == 200
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        _ollama_available = False
+
+    if _ollama_available:
+        logging.info("Ollama is available -- AI relevance checks enabled")
+    else:
+        logging.info("Ollama is not reachable -- AI relevance checks disabled, using static keywords only")
+    return _ollama_available
+
+
+def ai_check_relevance(job_title, job_titles_config, text_context="", timeout=10):
+    """Ask Ollama whether a job listing matches the candidate's target roles.
+
+    Runs only when Ollama is available. Returns (is_relevant, reason).
+    On any failure, returns (False, "") so the caller can fall through
+    to the next check gracefully.
+    """
+    if not _is_ollama_available():
+        return False, ""
+
+    ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+    ollama_model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+
+    system_prompt = (
+        "You are a strict job relevance classifier. "
+        "The user is searching for specific roles. "
+        "You must decide if the job listing is a genuine match for the target roles.\n"
+        "Rules:\n"
+        "1. Return ONLY 'YES' or 'NO' followed by a dash and a 3-8 word reason.\n"
+        "2. Be STRICT: the job must be the same function/domain as the target roles.\n"
+        "3. Generic IT support, testing, unrelated consulting, or tangentially related roles are NOT relevant.\n"
+        "4. Consider title, responsibilities, and required skills if JD is provided.\n"
+        "5. Example output: 'YES - devops infrastructure role' or 'NO - frontend web developer role'."
+    )
+
+    jd_section = ""
+    if text_context:
+        jd_section = f"\n\nJob Description excerpt:\n{text_context[:2000]}"
+
+    user_prompt = (
+        f"Target roles the candidate is looking for: {job_titles_config}\n"
+        f"Job listing title: {job_title}"
+        f"{jd_section}\n\n"
+        "Is this job relevant to the target roles? Answer YES or NO with reason."
+    )
+
+    try:
+        response = requests.post(
+            f"{ollama_url}/api/chat",
+            json={
+                "model": ollama_model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "stream": False,
+                "options": {"temperature": 0.0},
+            },
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        data = response.json()
+        raw = data.get("message", {}).get("content", "").strip()
+
+        first_word = raw.split()[0].upper().rstrip(".,:-") if raw else ""
+        is_relevant = first_word == "YES"
+        reason = raw[:100]
+
+        return is_relevant, reason
+
+    except requests.exceptions.ConnectionError:
+        global _ollama_available
+        _ollama_available = False
+        logging.warning("Ollama connection lost during relevance check, disabling AI checks")
+        return False, ""
+    except Exception as e:
+        logging.debug(f"AI relevance check failed: {e}")
+        return False, ""
 
 
 def load_applied_jobs():
@@ -335,7 +450,17 @@ def process_job_listings(driver, max_applications, relevance_keywords, applied_j
                 if title_relevant:
                     logging.info(f"Title is relevant (matched: '{matched_keyword}')")
                 else:
-                    logging.info(f"Title '{job_title}' did not match keywords, will check JD for relevance")
+                    job_titles_config = os.getenv("JOB_TITLES", "DevOps Engineer, Site Reliability Engineer")
+                    ai_relevant, ai_reason = ai_check_relevance(job_title, job_titles_config, timeout=10)
+                    if ai_relevant:
+                        title_relevant = True
+                        matched_keyword = f"ai:{ai_reason[:60]}"
+                        logging.info(f"AI title check: '{job_title}' -> RELEVANT ({ai_reason})")
+                    elif ai_reason:
+                        logging.info(f"AI title check: '{job_title}' -> NOT RELEVANT ({ai_reason}), skipping")
+                        continue
+                    else:
+                        logging.info(f"Title '{job_title}' did not match keywords, will check JD for relevance")
                 
                 tabs_opened += 1
                 
@@ -429,11 +554,23 @@ def check_and_apply(driver, job_title, company, relevance_keywords, title_releva
                 save_screenshot(driver, f"skipped_irrelevant_{company.replace(' ', '_')[:20]}", "info")
                 return False
 
-            jd_relevant, matched_keyword = is_job_relevant(jd_text, relevance_keywords)
+            jd_relevant, matched_keyword = is_job_relevant(jd_text, relevance_keywords, strict=True)
             if not jd_relevant:
-                logging.info(f"⊘ Skipping irrelevant job: '{job_title}' at {company} - no keyword match in title or JD")
-                save_screenshot(driver, f"skipped_irrelevant_{company.replace(' ', '_')[:20]}", "info")
-                return False
+                job_titles_config = os.getenv("JOB_TITLES", "DevOps Engineer, Site Reliability Engineer")
+                ai_relevant, ai_reason = ai_check_relevance(
+                    job_title, job_titles_config, text_context=jd_text[:2000], timeout=15
+                )
+                if ai_relevant:
+                    jd_relevant = True
+                    matched_keyword = f"ai:{ai_reason[:60]}"
+                    logging.info(f"AI JD check: '{job_title}' at {company} -> RELEVANT ({ai_reason})")
+                else:
+                    if ai_reason:
+                        logging.info(f"AI JD check: '{job_title}' at {company} -> NOT RELEVANT ({ai_reason})")
+                    else:
+                        logging.info(f"⊘ Skipping: '{job_title}' at {company} - no keyword match in title or JD")
+                    save_screenshot(driver, f"skipped_irrelevant_{company.replace(' ', '_')[:20]}", "info")
+                    return False
             logging.info(f"JD is relevant (matched: '{matched_keyword}')")
         
         company_site_buttons = driver.find_elements(By.XPATH, 
