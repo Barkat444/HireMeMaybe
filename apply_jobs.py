@@ -231,11 +231,14 @@ def save_applied_job(job_url):
         f.write(job_url + "\n")
 
 
-def build_search_url(job_title, location, experience, freshness_days=1):
+def build_search_url(job_title, location, experience, freshness_days=1, page=1):
     """Build a Naukri search URL with all filters baked in.
 
     URL pattern (confirmed working):
       https://www.naukri.com/{slug}-jobs-in-{location}?k={keyword}&l={location}&experience={exp}&jobAge={days}
+
+    Naukri supports URL-based pagination by appending -2, -3, etc. to the path:
+      https://www.naukri.com/{slug}-jobs-in-{location}-2?k=...
 
     Naukri defaults to 'Recommended' sort which blends relevance with recency.
     """
@@ -244,8 +247,10 @@ def build_search_url(job_title, location, experience, freshness_days=1):
     keyword_encoded = quote_plus(job_title)
     loc_encoded = quote_plus(location)
 
+    page_suffix = f"-{page}" if page > 1 else ""
+
     return (
-        f"https://www.naukri.com/{slug}-jobs-in-{loc_slug}"
+        f"https://www.naukri.com/{slug}-jobs-in-{loc_slug}{page_suffix}"
         f"?k={keyword_encoded}&l={loc_encoded}"
         f"&experience={experience}&jobAge={freshness_days}"
     )
@@ -296,25 +301,49 @@ def apply_for_jobs():
 
         logging.info(f"Target: Apply to {max_applications} jobs across {len(job_titles)} title(s)")
 
-        random.shuffle(job_titles)
+        freshness_tiers = [7, 3, 1]
+        if freshness_days not in freshness_tiers:
+            freshness_tiers = [freshness_days] + [f for f in freshness_tiers if f != freshness_days]
 
-        for title in job_titles:
+        for fresh_days in freshness_tiers:
             if applied_count >= max_applications:
                 break
 
-            location = random.choice(locations)
-            search_url = build_search_url(title, location, experience, freshness_days)
-            logging.info(f"Searching: '{title}' in {location} (exp={experience}, fresh={freshness_days}d)")
-            logging.info(f"URL: {search_url}")
+            titles_shuffled = job_titles[:]
+            random.shuffle(titles_shuffled)
 
-            search_for_jobs(driver, search_url)
+            logging.info(f"--- Freshness tier: last {fresh_days} day(s) ---")
 
-            remaining = max_applications - applied_count
-            new_apps = process_job_listings(driver, remaining, relevance_keywords, applied_jobs)
-            applied_count += new_apps
+            for title in titles_shuffled:
+                if applied_count >= max_applications:
+                    break
 
-            if applied_count < max_applications:
-                time.sleep(random.uniform(3, 6))
+                location = random.choice(locations)
+                search_url = build_search_url(title, location, experience, fresh_days)
+                logging.info(f"Searching: '{title}' in {location} (exp={experience}, fresh={fresh_days}d)")
+                logging.info(f"URL: {search_url}")
+
+                search_for_jobs(driver, search_url)
+
+                search_ctx = {
+                    "title": title, "location": location,
+                    "experience": experience, "freshness_days": fresh_days,
+                }
+                remaining = max_applications - applied_count
+                new_apps = process_job_listings(
+                    driver, remaining, relevance_keywords, applied_jobs,
+                    search_context=search_ctx,
+                )
+                applied_count += new_apps
+
+                if applied_count < max_applications:
+                    time.sleep(random.uniform(3, 6))
+
+            if applied_count > 0:
+                logging.info(f"Found {applied_count} jobs at {fresh_days}d freshness, stopping tier search")
+                break
+            else:
+                logging.info(f"No jobs applied at {fresh_days}d freshness, trying narrower window...")
 
         if applied_count >= max_applications:
             logging.info(f"Successfully applied to {applied_count} jobs (reached target of {max_applications})")
@@ -365,7 +394,141 @@ def search_for_jobs(driver, search_url):
         logging.error(f"Error loading search results: {e}")
         save_screenshot(driver, "job_search_error", "failure")
 
-def process_job_listings(driver, max_applications, relevance_keywords, applied_jobs, page=1, max_pages=3):
+
+def _click_next_page_button(driver, current_page):
+    """Try to find and click the next-page button using expanded selectors + AI fallback.
+    Returns True if the next page loaded successfully."""
+
+    next_page_num = current_page + 1
+
+    pagination_selectors = [
+        f"a[href*='-{next_page_num}?']",
+        f"a[title='Page {next_page_num}']",
+        f"a[data-page='{next_page_num}']",
+        ".fright.fs14.btn-secondary.br2",
+        "a.fright",
+        "a[title='Next']",
+        ".pagination a.next",
+        "[class*='pagination'] a.fright",
+        "[class*='paginat'] a:last-child",
+        "a[class*='nxt']",
+        "a[class*='next']",
+        "span[class*='next'] a",
+    ]
+
+    for sel in pagination_selectors:
+        try:
+            buttons = driver.find_elements(By.CSS_SELECTOR, sel)
+            for btn in buttons:
+                if btn.is_displayed():
+                    logging.info(f"Found next-page button via selector: {sel}")
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                    time.sleep(random.uniform(0.5, 1.0))
+                    driver.execute_script("arguments[0].click();", btn)
+                    time.sleep(random.uniform(4, 7))
+                    return True
+        except Exception:
+            continue
+
+    try:
+        xpath_patterns = [
+            f"//a[contains(@href, '-{next_page_num}?')]",
+            "//a[contains(@class, 'fright') and (contains(@class, 'btn') or contains(@class, 'next'))]",
+            "//*[contains(@class, 'paginat')]//a[last()]",
+            "//a[text()='Next' or text()='next' or text()='>']",
+            f"//a[text()='{next_page_num}']",
+        ]
+        for xp in xpath_patterns:
+            els = driver.find_elements(By.XPATH, xp)
+            for el in els:
+                if el.is_displayed():
+                    logging.info(f"Found next-page button via XPath: {xp}")
+                    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", el)
+                    time.sleep(random.uniform(0.5, 1.0))
+                    driver.execute_script("arguments[0].click();", el)
+                    time.sleep(random.uniform(4, 7))
+                    return True
+    except Exception:
+        pass
+
+    if _is_ollama_available():
+        try:
+            page_text = driver.execute_script(
+                "return document.querySelector('body').innerText.substring("
+                "document.querySelector('body').innerText.length - 3000);"
+            )
+            pagination_html = ""
+            try:
+                pagination_html = driver.execute_script("""
+                    var els = document.querySelectorAll(
+                        '[class*="paginat"], [class*="Paginat"], nav, .pagesList'
+                    );
+                    var html = '';
+                    els.forEach(function(el) { html += el.outerHTML + '\\n'; });
+                    return html.substring(0, 2000);
+                """)
+            except Exception:
+                pass
+
+            prompt = (
+                f"I am on page {current_page} of Naukri.com job search results. "
+                f"I need to navigate to page {next_page_num}.\n\n"
+                "Find the CSS selector or XPath for the next-page link/button. "
+                "Return ONLY one selector like:\ncss: <selector>\nor\nxpath: <selector>\n\n"
+            )
+            if pagination_html:
+                prompt += f"Pagination HTML:\n{pagination_html}\n\n"
+            else:
+                prompt += f"Page bottom text:\n{page_text[-1500:]}\n\n"
+
+            ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+            ollama_model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
+            response = requests.post(
+                f"{ollama_url}/api/chat",
+                json={
+                    "model": ollama_model,
+                    "messages": [
+                        {"role": "system", "content": "You are a web automation assistant. Return ONLY the selector, no explanation."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "stream": False,
+                    "options": {"temperature": 0.0},
+                },
+                timeout=15,
+            )
+            response.raise_for_status()
+            raw = response.json().get("message", {}).get("content", "").strip()
+            logging.info(f"AI pagination suggestion: {raw[:100]}")
+
+            for line in raw.split("\n"):
+                line = line.strip()
+                if line.startswith("css:"):
+                    sel = line[4:].strip().strip("'\"")
+                    els = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for el in els:
+                        if el.is_displayed():
+                            driver.execute_script("arguments[0].click();", el)
+                            logging.info(f"AI clicked next-page via CSS: {sel}")
+                            time.sleep(random.uniform(4, 7))
+                            return True
+                elif line.startswith("xpath:"):
+                    sel = line[6:].strip().strip("'\"")
+                    els = driver.find_elements(By.XPATH, sel)
+                    for el in els:
+                        if el.is_displayed():
+                            driver.execute_script("arguments[0].click();", el)
+                            logging.info(f"AI clicked next-page via XPath: {sel}")
+                            time.sleep(random.uniform(4, 7))
+                            return True
+        except Exception as e:
+            logging.debug(f"AI pagination fallback failed: {e}")
+
+    logging.info("All pagination methods exhausted")
+    return False
+
+
+def process_job_listings(driver, max_applications, relevance_keywords, applied_jobs,
+                         page=1, max_pages=3, search_context=None):
     """
     Process the job listings page and apply to suitable jobs.
     Paginates up to max_pages when more relevant jobs are needed.
@@ -498,24 +661,40 @@ def process_job_listings(driver, max_applications, relevance_keywords, applied_j
                 continue
         
         if applied_count < max_applications and page < max_pages:
-            try:
-                next_page_buttons = driver.find_elements(By.CSS_SELECTOR, 
-                    ".fright.fs14.btn-secondary.br2, a.fright, .nextPage, a[title='Next']")
-                
-                if next_page_buttons:
-                    logging.info(f"Moving to page {page + 1} of results")
-                    next_page_buttons[0].click()
-                    time.sleep(random.uniform(4, 7))
-                    
-                    additional_applications = process_job_listings(
-                        driver, max_applications - applied_count, relevance_keywords, applied_jobs,
-                        page=page + 1, max_pages=max_pages
+            next_page_loaded = False
+
+            if search_context:
+                try:
+                    next_url = build_search_url(
+                        search_context["title"], search_context["location"],
+                        search_context["experience"], search_context["freshness_days"],
+                        page=page + 1,
                     )
-                    applied_count += additional_applications
-                else:
-                    logging.info("No next page button found, end of results")
-            except Exception as e:
-                logging.error(f"Error navigating to next page: {e}")
+                    logging.info(f"Navigating to page {page + 1} via URL: {next_url}")
+                    driver.get(next_url)
+                    time.sleep(random.uniform(4, 7))
+                    test_listings = driver.find_elements(By.CSS_SELECTOR,
+                        ".srp-jobtuple-wrapper, .jobTupleHeader, .cust-job-tuple, "
+                        ".jobTuple, div[type='tuple']")
+                    if test_listings:
+                        next_page_loaded = True
+                        logging.info(f"Page {page + 1} loaded via URL ({len(test_listings)} listings)")
+                    else:
+                        logging.info(f"Page {page + 1} URL returned no listings, end of results")
+                except Exception as e:
+                    logging.warning(f"URL-based pagination failed: {e}")
+
+            if not next_page_loaded:
+                next_page_loaded = _click_next_page_button(driver, page)
+
+            if next_page_loaded:
+                additional_applications = process_job_listings(
+                    driver, max_applications - applied_count, relevance_keywords, applied_jobs,
+                    page=page + 1, max_pages=max_pages, search_context=search_context,
+                )
+                applied_count += additional_applications
+            else:
+                logging.info("No more pages available")
     
     except Exception as e:
         logging.error(f"Error finding job listings: {e}")
