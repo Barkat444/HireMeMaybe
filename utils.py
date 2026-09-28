@@ -1,5 +1,7 @@
 import os
+import stat
 import time
+import atexit
 import logging
 import shutil
 import tempfile
@@ -24,6 +26,10 @@ LOGS_DIR = os.path.join(os.getcwd(), "debug", "logs")
 # Ensure directories exist
 os.makedirs(IMAGES_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
+
+CHROME_PROFILE_PREFIX = "chrome_user_data_"
+# Profiles older than this are assumed orphaned; keeps concurrent runs' live profiles safe
+STALE_PROFILE_AGE_SECONDS = 6 * 60 * 60
 
 def setup_logging():
     """
@@ -76,16 +82,77 @@ def init_driver():
     # For Docker deployment, we need to use headless mode
     chrome_options.add_argument("--headless=new")
     
-    # Use a temporary directory for user-data-dir
-    unique_dir = f"/tmp/chrome_user_data_{int(time.time())}"
-    chrome_options.add_argument(f"--user-data-dir={unique_dir}")
-    logging.debug(f"Using temporary user-data-dir: {unique_dir}")
-    
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    
+    # Leftovers from crashed/killed runs are swept before creating a new profile
+    _cleanup_stale_profiles()
+
+    profile_dir = tempfile.mkdtemp(prefix=CHROME_PROFILE_PREFIX)
+    chrome_options.add_argument(f"--user-data-dir={profile_dir}")
+    logging.debug(f"Using temporary user-data-dir: {profile_dir}")
+    atexit.register(_remove_dir, profile_dir)
+
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+    except Exception:
+        _remove_dir(profile_dir)
+        raise
+
+    original_quit = driver.quit
+
+    def quit_and_cleanup():
+        try:
+            original_quit()
+        finally:
+            _remove_dir(profile_dir)
+
+    driver.quit = quit_and_cleanup
+
     logging.debug("WebDriver initialized successfully")
     return driver
+
+
+def _remove_dir(path, retries=5, delay=1.0):
+    """Delete a directory tree, retrying because Chrome may briefly hold file locks after quit (Windows)."""
+    def _on_error(func, p, _exc_info):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass
+
+    for _ in range(retries):
+        if not os.path.exists(path):
+            return
+        shutil.rmtree(path, onerror=_on_error)
+        if not os.path.exists(path):
+            logging.debug(f"Removed Chrome profile dir: {path}")
+            return
+        time.sleep(delay)
+    logging.warning(f"Could not fully remove Chrome profile dir: {path}")
+
+
+def _cleanup_stale_profiles():
+    """Remove old chrome_user_data_* dirs left behind by previous runs that didn't exit cleanly."""
+    # /tmp is the legacy location (C:\tmp on Windows) used by older versions of this script
+    base_dirs = {tempfile.gettempdir(), os.path.abspath("/tmp")}
+    now = time.time()
+    for base in base_dirs:
+        if not os.path.isdir(base):
+            continue
+        try:
+            entries = os.listdir(base)
+        except OSError:
+            continue
+        for name in entries:
+            if not name.startswith(CHROME_PROFILE_PREFIX):
+                continue
+            path = os.path.join(base, name)
+            try:
+                if not os.path.isdir(path) or now - os.path.getmtime(path) < STALE_PROFILE_AGE_SECONDS:
+                    continue
+            except OSError:
+                continue
+            _remove_dir(path, retries=1)
 
 def login(driver, max_attempts=3):
     """Login to Naukri.com with credentials from environment variables"""
